@@ -11,8 +11,8 @@ export async function uploadResume(file) {
   return res.json()
 }
 
-export async function listResumes() {
-  const res = await fetch(`${BASE}/resumes`)
+export async function listResumes(limit = 20, offset = 0) {
+  const res = await fetch(`${BASE}/resumes?limit=${limit}&offset=${offset}`)
   if (!res.ok) throw new Error('Failed to fetch resumes')
   return res.json()
 }

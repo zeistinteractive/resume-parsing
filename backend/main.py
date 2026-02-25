@@ -2,12 +2,10 @@
 Resume Engine MVP - FastAPI Backend
 Handles upload, parsing, search of resumes.
 """
-import os
 import uuid
-import asyncio
 from pathlib import Path
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
+from fastapi import FastAPI, File, Request, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -16,12 +14,12 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from database import (
-    init_db, insert_resume, update_resume_parsed, update_resume_failed,
+    init_db, insert_resume,
     get_all_resumes, get_resume_by_id, delete_resume,
-    count_resumes, search_resumes
+    count_resumes, search_resumes,
 )
-from parser import extract_text
-from ai_parser import parse_resume
+from tasks import parse_resume_task
+from events import sse_endpoint
 
 # ─── App setup ────────────────────────────────────────────────────────────────
 
@@ -38,7 +36,6 @@ app.add_middleware(
 UPLOAD_DIR = Path(__file__).parent / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
 
-MAX_RESUMES = 50
 MAX_FILE_SIZE_MB = 5
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".doc"}
 
@@ -56,26 +53,23 @@ def health_check():
     return {"status": "ok", "service": "Resume Engine API"}
 
 
+# ─── SSE Event Stream ──────────────────────────────────────────────────────────
+
+@app.get("/api/events")
+async def events(request: Request):
+    return await sse_endpoint(request)
+
+
 # ─── Upload Resume ─────────────────────────────────────────────────────────────
 
 @app.post("/api/upload")
-async def upload_resume(
-    background_tasks: BackgroundTasks,
-    file: UploadFile = File(...)
-):
+async def upload_resume(file: UploadFile = File(...)):
     # Validate file extension
     suffix = Path(file.filename).suffix.lower()
     if suffix not in ALLOWED_EXTENSIONS:
         raise HTTPException(
             status_code=400,
             detail=f"Invalid file type '{suffix}'. Allowed: PDF, DOCX"
-        )
-
-    # Check resume count limit
-    if count_resumes() >= MAX_RESUMES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Maximum of {MAX_RESUMES} resumes reached. Delete some to upload more."
         )
 
     # Read file content and check size
@@ -95,8 +89,8 @@ async def upload_resume(
     # Insert DB record
     resume_id = insert_resume(file.filename, str(file_path))
 
-    # Kick off background parsing
-    background_tasks.add_task(run_parsing, resume_id, str(file_path))
+    # Enqueue parse job — persisted in Redis, survives server restarts
+    parse_resume_task.delay(resume_id, str(file_path))
 
     return {
         "id": resume_id,
@@ -106,33 +100,13 @@ async def upload_resume(
     }
 
 
-async def run_parsing(resume_id: int, file_path: str):
-    """Background task: extract text then AI-parse the resume."""
-    try:
-        print(f"📄 Extracting text for resume {resume_id}...")
-        raw_text = extract_text(file_path)
-
-        if not raw_text:
-            print(f"⚠️  No text extracted for resume {resume_id}")
-            update_resume_failed(resume_id)
-            return
-
-        print(f"🤖 AI parsing resume {resume_id} ({len(raw_text)} chars)...")
-        parsed_data = parse_resume(raw_text)
-
-        update_resume_parsed(resume_id, raw_text, parsed_data)
-        print(f"✅ Resume {resume_id} parsed successfully: {parsed_data.get('name', 'Unknown')}")
-
-    except Exception as e:
-        print(f"❌ Parsing failed for resume {resume_id}: {e}")
-        update_resume_failed(resume_id)
-
-
 # ─── List Resumes ──────────────────────────────────────────────────────────────
 
 @app.get("/api/resumes")
-def list_resumes():
-    return get_all_resumes()
+def list_resumes(limit: int = 20, offset: int = 0):
+    total = count_resumes()
+    items = get_all_resumes(limit, offset)
+    return {"total": total, "items": items, "limit": limit, "offset": offset}
 
 
 # ─── Get Single Resume ─────────────────────────────────────────────────────────
@@ -153,7 +127,6 @@ def remove_resume(resume_id: int):
     if not resume:
         raise HTTPException(status_code=404, detail="Resume not found")
 
-    # Delete the file
     file_path = Path(resume["file_path"])
     if file_path.exists():
         file_path.unlink()
