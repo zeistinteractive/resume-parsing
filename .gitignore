@@ -1,0 +1,42 @@
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+venv/
+.venv/
+env/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / Frontend
+node_modules/
+.next/
+out/
+dist/
+.cache/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Runtime data
+backend/*.db
+backend/uploads/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
