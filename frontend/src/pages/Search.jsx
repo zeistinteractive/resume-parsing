@@ -465,11 +465,12 @@ function BulkBar({ count, onSelectAll, onClear, onDownload, downloading }) {
 }
 
 // ── Session persistence ────────────────────────────────────────────────────────
-// Read once at module load so back-navigation restores the previous search.
-const _ss = (() => {
+// Called as a lazy useState initializer — runs fresh on every component mount,
+// so navigating back from a detail page always restores the previous search.
+function _readSession() {
   try { const s = sessionStorage.getItem('resumeSearch'); return s ? JSON.parse(s) : null }
   catch { return null }
-})()
+}
 
 // ── Main Search Page ───────────────────────────────────────────────────────────
 
@@ -491,12 +492,12 @@ export default function Search() {
   const navigate = useNavigate()
 
   // ── Search state ─────────────────────────────────────────────────────────────
-  const [query,   setQuery]   = useState(_ss?.query   ?? '')
-  const [mode,    setMode]    = useState(_ss?.mode    ?? 'or')
-  const [filters, setFilters] = useState(_ss?.filters ?? EMPTY_FILTERS)
-  const [sort,    setSort]    = useState(_ss?.sort    ?? 'relevance')
-  const [limit,   setLimit]   = useState(_ss?.limit   ?? 25)
-  const [offset,  setOffset]  = useState(_ss?.offset  ?? 0)
+  const [query,   setQuery]   = useState(() => _readSession()?.query   ?? '')
+  const [mode,    setMode]    = useState(() => _readSession()?.mode    ?? 'or')
+  const [filters, setFilters] = useState(() => { const s = _readSession(); return s?.filters ? { ...EMPTY_FILTERS, ...s.filters } : EMPTY_FILTERS })
+  const [sort,    setSort]    = useState(() => _readSession()?.sort    ?? 'relevance')
+  const [limit,   setLimit]   = useState(() => _readSession()?.limit   ?? 25)
+  const [offset,  setOffset]  = useState(() => _readSession()?.offset  ?? 0)
 
   // ── Results state ─────────────────────────────────────────────────────────────
   const [results,     setResults]     = useState(null)   // null = not searched yet
