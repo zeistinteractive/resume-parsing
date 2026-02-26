@@ -54,8 +54,8 @@ export default function ResumeDetail() {
       <div className="flex items-start justify-between mb-6">
         <div>
           <button onClick={() => navigate(-1)}
-            className="text-sm text-gray-400 hover:text-gray-600 mb-2 flex items-center gap-1">
-            ← Back
+            className="inline-flex items-center gap-1.5 text-sm text-gray-500 hover:text-gray-800 mb-3 px-3 py-1.5 rounded-lg hover:bg-gray-100 transition-colors">
+            ← Back to results
           </button>
           <h1 className="text-3xl font-bold text-gray-900">{p.name || resume.filename}</h1>
           {p.email && <p className="text-gray-500 mt-1">{p.email}{p.phone ? ` · ${p.phone}` : ''}</p>}
