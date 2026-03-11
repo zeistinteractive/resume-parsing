@@ -12,8 +12,15 @@ from synonyms import build_fts_conditions, expand_skills, get_skill_synonyms
 
 DATABASE_URL: str = os.getenv(
     "DATABASE_URL",
-    "postgresql://resume_user:resume_pass@localhost:5432/resume_engine",
+    "postgresql://resume_user:resume_pass@postgres:5432/resume_engine",
 )
+
+# Pool size configurable via env — default 2/20 for production workloads
+_DB_POOL_MIN = int(os.getenv("DB_POOL_MIN", "2"))
+_DB_POOL_MAX = int(os.getenv("DB_POOL_MAX", "20"))
+
+# Long-running query guard — kills queries that take more than this many ms
+_STATEMENT_TIMEOUT_MS = int(os.getenv("DB_STATEMENT_TIMEOUT_MS", "30000"))
 
 _pool: Optional[ThreadedConnectionPool] = None
 
@@ -21,7 +28,9 @@ _pool: Optional[ThreadedConnectionPool] = None
 def _get_pool() -> ThreadedConnectionPool:
     global _pool
     if _pool is None:
-        _pool = ThreadedConnectionPool(minconn=2, maxconn=10, dsn=DATABASE_URL)
+        _pool = ThreadedConnectionPool(
+            minconn=_DB_POOL_MIN, maxconn=_DB_POOL_MAX, dsn=DATABASE_URL
+        )
     return _pool
 
 
@@ -31,6 +40,9 @@ def _get_conn():
     pool = _get_pool()
     conn = pool.getconn()
     try:
+        # Prevent runaway queries from holding connections
+        with conn.cursor() as c:
+            c.execute(f"SET statement_timeout = {_STATEMENT_TIMEOUT_MS}")
         yield conn
         conn.commit()
     except Exception:
@@ -68,11 +80,14 @@ def init_db():
             # Add filter columns when upgrading from an older schema
             # ADD COLUMN IF NOT EXISTS is safe to run repeatedly.
             for col, col_type in [
-                ("experience_years", "SMALLINT"),
-                ("current_title",    "TEXT"),
-                ("location",         "TEXT"),
-                ("notice_period",    "TEXT"),
-                ("education_level",  "TEXT"),
+                ("experience_years",  "SMALLINT"),
+                ("current_title",     "TEXT"),
+                ("location",          "TEXT"),
+                ("notice_period",     "TEXT"),
+                ("education_level",   "TEXT"),
+                ("file_hash",         "TEXT"),   # SHA-256 hex of the uploaded file
+                ("uploaded_by_id",    "TEXT"),   # UUID of the user who uploaded
+                ("uploaded_by_name",  "TEXT"),   # Full name snapshot at upload time
             ]:
                 c.execute(
                     f"ALTER TABLE resumes ADD COLUMN IF NOT EXISTS {col} {col_type}"
@@ -138,6 +153,28 @@ def init_db():
                 "ON resumes USING GIN ((parsed_data->'skills'))"
             )
 
+            # Unique partial index on file_hash — NULL rows excluded so old
+            # records without a hash don't conflict with each other.
+            c.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS resumes_file_hash_idx "
+                "ON resumes (file_hash) WHERE file_hash IS NOT NULL"
+            )
+
+            # Partial index on parse_status — almost every query filters by this.
+            # Only indexes 'success' rows since those are queried exclusively.
+            c.execute(
+                "CREATE INDEX IF NOT EXISTS resumes_parse_status_idx "
+                "ON resumes (parse_status) WHERE parse_status = 'success'"
+            )
+
+            # pg_trgm for substring ILIKE on location (autocomplete uses %q%)
+            c.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+            c.execute(
+                "CREATE INDEX IF NOT EXISTS resumes_location_trgm_idx "
+                "ON resumes USING GIN (lower(location) gin_trgm_ops) "
+                "WHERE location IS NOT NULL"
+            )
+
             # Download history — one row per file served (single or bulk).
             # resume_id is nullable so rows survive resume deletion.
             c.execute("""
@@ -159,22 +196,86 @@ def init_db():
                 "ON download_history (downloaded_at DESC)"
             )
 
+            # skills_vocabulary — pre-computed distinct skill list for fast autocomplete.
+            # Avoids full jsonb_array_elements_text scan on 50k+ resumes.
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS skills_vocabulary (
+                    skill      TEXT PRIMARY KEY,
+                    frequency  INTEGER NOT NULL DEFAULT 1,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            c.execute(
+                "CREATE INDEX IF NOT EXISTS skills_vocab_skill_idx "
+                "ON skills_vocabulary (lower(skill) text_pattern_ops)"
+            )
+
     print("✅ Database initialized")
 
 
 # ── Write operations ──────────────────────────────────────────────────────────
 
-def insert_resume(filename: str, file_path: str) -> int:
+def insert_resume(
+    filename: str,
+    file_path: str,
+    file_hash: str = None,
+    uploaded_by_id: str = None,
+    uploaded_by_name: str = None,
+) -> int:
     with _get_conn() as conn:
         with conn.cursor() as c:
             c.execute(
                 """
-                INSERT INTO resumes (filename, file_path, parse_status)
-                VALUES (%s, %s, 'pending') RETURNING id
+                INSERT INTO resumes
+                    (filename, file_path, file_hash, parse_status,
+                     uploaded_by_id, uploaded_by_name)
+                VALUES (%s, %s, %s, 'pending', %s, %s)
+                RETURNING id
                 """,
-                (filename, file_path),
+                (filename, file_path, file_hash, uploaded_by_id, uploaded_by_name),
             )
             return c.fetchone()[0]
+
+
+def get_resume_by_hash(file_hash: str):
+    """
+    Return the existing resume row whose file_hash matches, or None.
+    Used at upload time to instantly detect byte-identical duplicates.
+    """
+    with _get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as c:
+            c.execute(
+                "SELECT id, filename, parse_status, uploaded_at "
+                "FROM resumes WHERE file_hash = %s LIMIT 1",
+                (file_hash,),
+            )
+            row = c.fetchone()
+            return dict(row) if row else None
+
+
+def find_duplicate_candidate(name: str, email: str, exclude_id: int):
+    """
+    After parsing, check whether another successfully-parsed resume already
+    has the same candidate name + email.  Returns that resume's id, or None.
+    Only meaningful when both name and email are non-empty strings.
+    """
+    if not name or not email:
+        return None
+    with _get_conn() as conn:
+        with conn.cursor() as c:
+            c.execute(
+                """
+                SELECT id FROM resumes
+                WHERE parse_status = 'success'
+                  AND id            != %s
+                  AND lower(parsed_data->>'name')  = lower(%s)
+                  AND lower(parsed_data->>'email') = lower(%s)
+                LIMIT 1
+                """,
+                (exclude_id, name.strip(), email.strip()),
+            )
+            row = c.fetchone()
+            return row[0] if row else None
 
 
 def update_resume_parsed(resume_id: int, raw_text: str, parsed_data: dict):
@@ -344,6 +445,22 @@ def get_all_resumes(limit: int = 20, offset: int = 0) -> list:
     return results
 
 
+def get_resumes_by_ids(ids: list) -> list:
+    """
+    Fetch multiple resumes in a single query (used by bulk download).
+    Returns only the fields needed for download — avoids N individual lookups.
+    """
+    if not ids:
+        return []
+    with _get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as c:
+            c.execute(
+                "SELECT id, filename, file_path FROM resumes WHERE id = ANY(%s)",
+                (list(ids),),
+            )
+            return [dict(r) for r in c.fetchall()]
+
+
 def get_resume_by_id(resume_id: int) -> Optional[dict]:
     with _get_conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as c:
@@ -395,6 +512,7 @@ def search_resumes(
     notice_period: str = "",
     date_from: str = None,
     date_to: str = None,
+    uploaded_by: str = None,
     sort: str = "relevance",
     limit: int = 25,
     offset: int = 0,
@@ -485,6 +603,10 @@ def search_resumes(
         conditions.append("uploaded_at < (%s::date + interval '1 day')")
         params.append(date_to)
 
+    if uploaded_by:
+        conditions.append("uploaded_by_id = %s")
+        params.append(uploaded_by)
+
     where_sql = " AND ".join(conditions)
 
     # ── ORDER BY ──────────────────────────────────────────────────────────────
@@ -520,6 +642,7 @@ def search_resumes(
             parsed_data->>'email' AS email,
             parsed_data->'skills' AS skills_json,
             current_title, experience_years, location,
+            uploaded_by_id, uploaded_by_name,
             {score_expr},
             {snippet_expr}
         FROM resumes
@@ -556,8 +679,10 @@ def search_resumes(
             "skills":          _extract_skills(row["skills_json"], limit=8),
             "current_title":   row["current_title"],
             "experience_years": row["experience_years"],
-            "location":        row["location"],
-            "snippet":         row["snippet"] or "",
+            "location":          row["location"],
+            "uploaded_by_id":    row["uploaded_by_id"],
+            "uploaded_by_name":  row["uploaded_by_name"],
+            "snippet":           row["snippet"] or "",
         })
 
     return {
@@ -567,6 +692,26 @@ def search_resumes(
         "offset":  offset,
         "query":   query,
     }
+
+
+# ── Uploaders ─────────────────────────────────────────────────────────────────
+
+def get_uploaders() -> list:
+    """
+    Return distinct uploaders who have at least one successfully parsed resume.
+    Used to populate the "Uploaded by" dropdown on the search page.
+    """
+    with _get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as c:
+            c.execute("""
+                SELECT DISTINCT uploaded_by_id   AS id,
+                                uploaded_by_name AS full_name
+                FROM   resumes
+                WHERE  parse_status    = 'success'
+                  AND  uploaded_by_id  IS NOT NULL
+                ORDER  BY uploaded_by_name
+            """)
+            return [dict(r) for r in c.fetchall()]
 
 
 # ── Autocomplete ──────────────────────────────────────────────────────────────
@@ -612,18 +757,40 @@ def autocomplete_locations(q: str, limit: int = 8) -> list:
 
 
 def autocomplete_skills(q: str, limit: int = 10) -> list:
-    """Return distinct skill values from the JSONB array that start with q."""
+    """
+    Return skill suggestions from the pre-computed skills_vocabulary table.
+    Falls back to a capped direct scan if the vocabulary is empty.
+    """
     if not q:
         return []
     with _get_conn() as conn:
         with conn.cursor() as c:
+            # Fast path — vocabulary table (O(log n) prefix scan)
+            c.execute(
+                """
+                SELECT skill FROM skills_vocabulary
+                WHERE lower(skill) LIKE lower(%s)
+                ORDER BY frequency DESC, skill
+                LIMIT %s
+                """,
+                (f"{q}%", limit),
+            )
+            rows = c.fetchall()
+            if rows:
+                return [row[0] for row in rows if row[0]]
+
+            # Fallback — direct scan capped at 5000 most recent resumes
             c.execute(
                 """
                 SELECT DISTINCT skill
-                FROM resumes,
-                     jsonb_array_elements_text(parsed_data->'skills') AS skill
-                WHERE parse_status = 'success'
-                  AND skill ILIKE %s
+                FROM (
+                    SELECT jsonb_array_elements_text(parsed_data->'skills') AS skill
+                    FROM resumes
+                    WHERE parse_status = 'success'
+                    ORDER BY uploaded_at DESC
+                    LIMIT 5000
+                ) sub
+                WHERE skill ILIKE %s
                 ORDER BY skill
                 LIMIT %s
                 """,
@@ -685,6 +852,61 @@ def delete_saved_search(search_id: int) -> bool:
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def upsert_skills(skills: list) -> None:
+    """
+    Add/increment skills in the vocabulary table after a resume is parsed.
+    Called by the Celery parse task — keeps autocomplete fast at scale.
+    """
+    if not skills:
+        return
+    # Deduplicate and normalise
+    unique = list({s.strip() for s in skills if s and s.strip()})
+    if not unique:
+        return
+    with _get_conn() as conn:
+        with conn.cursor() as c:
+            c.executemany(
+                """
+                INSERT INTO skills_vocabulary (skill, frequency)
+                VALUES (%s, 1)
+                ON CONFLICT (skill) DO UPDATE
+                    SET frequency  = skills_vocabulary.frequency + 1,
+                        updated_at = NOW()
+                """,
+                [(s,) for s in unique],
+            )
+
+
+def purge_old_records(
+    download_history_days: int = 90,
+    audit_log_days: int = 365,
+) -> dict:
+    """
+    Delete old rows from download_history and audit_logs to prevent unbounded growth.
+    Safe to run as a scheduled Celery beat task.
+    Returns counts of deleted rows.
+    """
+    deleted = {}
+    with _get_conn() as conn:
+        with conn.cursor() as c:
+            c.execute(
+                "DELETE FROM download_history "
+                "WHERE downloaded_at < NOW() - INTERVAL '%s days'",
+                (download_history_days,),
+            )
+            deleted["download_history"] = c.rowcount
+
+    # Import here to avoid circular import (users_db uses database pool)
+    try:
+        from users_db import purge_old_audit_logs
+        deleted["audit_logs"] = purge_old_audit_logs(audit_log_days)
+    except Exception as e:
+        print(f"⚠️  Audit log purge failed: {e}")
+        deleted["audit_logs"] = 0
+
+    return deleted
+
 
 def _build_websearch_query(raw: str, mode: str = "or") -> str:
     """

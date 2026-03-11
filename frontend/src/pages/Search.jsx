@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
-  searchResumes, autocomplete,
+  searchResumes, autocomplete, getUploaders,
   listSavedSearches, createSavedSearch, deleteSavedSearch,
   downloadUrl, bulkDownload,
 } from '../api'
@@ -25,7 +25,7 @@ const LIMIT_OPTIONS = [25, 50, 100]
 const EMPTY_FILTERS = {
   title: '', skills: [], exp_min: '', exp_max: '',
   location: '', education: '', notice_period: '',
-  date_from: '', date_to: '',
+  date_from: '', date_to: '', uploaded_by: '',
 }
 
 // ── Small shared components ────────────────────────────────────────────────────
@@ -95,7 +95,7 @@ function AutocompleteInput({ value, onChange, onSelect, placeholder, type, class
 
 // ── Filter Panel ───────────────────────────────────────────────────────────────
 
-function FilterPanel({ filters, onChange, onClear, activeCount }) {
+function FilterPanel({ filters, onChange, onClear, activeCount, uploaders = [] }) {
   const [skillInput, setSkillInput] = useState('')
 
   const set = (key, val) => onChange({ ...filters, [key]: val })
@@ -227,6 +227,22 @@ function FilterPanel({ filters, onChange, onClear, activeCount }) {
             className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" />
         </div>
       </div>
+
+      {/* Uploaded By */}
+      {uploaders.length > 0 && (
+        <div>
+          <label className="block text-xs font-medium text-gray-500 mb-1.5">Uploaded By</label>
+          <select
+            value={filters.uploaded_by}
+            onChange={e => set('uploaded_by', e.target.value)}
+            className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 bg-white">
+            <option value="">Anyone</option>
+            {uploaders.map(u => (
+              <option key={u.id} value={u.id}>{u.full_name}</option>
+            ))}
+          </select>
+        </div>
+      )}
     </aside>
   )
 }
@@ -481,6 +497,7 @@ function countActiveFilters(filters) {
     filters.exp_min !== '',
     filters.exp_max !== '',
     filters.location,
+    filters.uploaded_by,
     filters.education,
     filters.notice_period,
     filters.date_from,
@@ -505,6 +522,7 @@ export default function Search() {
   const [loading,     setLoading]     = useState(false)
   const [error,       setError]       = useState(null)
   const [filtersOpen, setFiltersOpen] = useState(true)
+  const [uploaders,   setUploaders]   = useState([])
 
   // ── Selection state ───────────────────────────────────────────────────────────
   const [selected,    setSelected]    = useState(new Set())
@@ -515,6 +533,7 @@ export default function Search() {
 
   useEffect(() => {
     listSavedSearches().then(setSaved).catch(() => {})
+    getUploaders().then(setUploaders).catch(() => {})
   }, [])
 
   // Persist state so back-navigation restores the search
@@ -540,8 +559,9 @@ export default function Search() {
         location:      f.location,
         education:     f.education,
         notice_period: f.notice_period,
-        date_from:     f.date_from || undefined,
-        date_to:       f.date_to   || undefined,
+        date_from:     f.date_from   || undefined,
+        date_to:       f.date_to     || undefined,
+        uploaded_by:   f.uploaded_by || undefined,
         sort:          s,
         limit:         lim,
         offset:        off,
@@ -722,6 +742,7 @@ export default function Search() {
             onChange={(f) => resetAndSearch({ filters: f })}
             onClear={() => resetAndSearch({ filters: EMPTY_FILTERS })}
             activeCount={activeFilterCount}
+            uploaders={uploaders}
           />
         )}
 

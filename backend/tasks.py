@@ -2,33 +2,39 @@ import json
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)
 
 import redis as sync_redis
 from celery.exceptions import SoftTimeLimitExceeded
 
 from celery_app import celery
-from database import update_resume_parsed, update_resume_failed
+from database import (
+    update_resume_parsed, update_resume_failed,
+    find_duplicate_candidate, upsert_skills,
+)
 from parser import extract_text
 from ai_parser import parse_resume
 
-REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+REDIS_URL: str = os.getenv("REDIS_URL", "redis://redis:6379/0")
+
+# Shared Redis connection pool for SSE publish — avoids creating a new
+# connection for every task execution
+_redis_pool = sync_redis.ConnectionPool.from_url(
+    REDIS_URL, decode_responses=True, max_connections=5
+)
 
 
-def _publish_status(resume_id: int, status: str, candidate_name: str = None):
+def _publish_status(resume_id: int, status: str, **extra):
     """
     Publish a parse-status event to the 'resume_events' Redis channel.
     The SSE endpoint in events.py forwards this to every connected browser.
+    Extra keyword args are merged into the payload (e.g. candidate_name,
+    is_duplicate_candidate, duplicate_of).
     """
     try:
-        r = sync_redis.from_url(REDIS_URL)
-        payload = json.dumps({
-            "resume_id":      resume_id,
-            "status":         status,
-            "candidate_name": candidate_name,
-        })
+        r = sync_redis.Redis(connection_pool=_redis_pool)
+        payload = json.dumps({"resume_id": resume_id, "status": status, **extra})
         r.publish("resume_events", payload)
-        r.close()
     except Exception as e:
         # Non-fatal — DB is already updated; SSE is best-effort
         print(f"⚠️  Failed to publish SSE event for resume {resume_id}: {e}")
@@ -49,13 +55,16 @@ def parse_resume_task(self, resume_id: int, file_path: str):
     Killed after 3 minutes to prevent Gemini API hangs.
     """
     try:
+        # Notify UI that the worker has picked up the task
+        _publish_status(resume_id, "processing")
+
         print(f"📄 [Task {self.request.id}] Extracting text for resume {resume_id}...")
         raw_text = extract_text(file_path)
 
         if not raw_text:
             print(f"⚠️  No text extracted for resume {resume_id} — marking failed")
             update_resume_failed(resume_id)
-            _publish_status(resume_id, "failed")
+            _publish_status(resume_id, "failed", error="No text could be extracted")
             return
 
         print(f"🤖 [Task {self.request.id}] AI parsing resume {resume_id} ({len(raw_text)} chars)...")
@@ -63,13 +72,34 @@ def parse_resume_task(self, resume_id: int, file_path: str):
 
         update_resume_parsed(resume_id, raw_text, parsed_data)
         candidate_name = parsed_data.get("name", "Unknown")
-        print(f"✅ Resume {resume_id} parsed successfully: {candidate_name}")
-        _publish_status(resume_id, "success", candidate_name)
+
+        # Update skills vocabulary for fast autocomplete at scale
+        try:
+            upsert_skills(parsed_data.get("skills", []))
+        except Exception as e:
+            print(f"⚠️  Skills vocabulary update failed for resume {resume_id}: {e}")
+
+        # Check if another resume already exists for the same candidate (name + email)
+        dup_id = find_duplicate_candidate(
+            name       = parsed_data.get("name", ""),
+            email      = parsed_data.get("email", ""),
+            exclude_id = resume_id,
+        )
+
+        print(f"✅ Resume {resume_id} parsed: {candidate_name}"
+              + (f" [duplicate candidate of #{dup_id}]" if dup_id else ""))
+        _publish_status(
+            resume_id,
+            "success",
+            candidate_name            = candidate_name,
+            is_duplicate_candidate    = dup_id is not None,
+            duplicate_of              = dup_id,
+        )
 
     except SoftTimeLimitExceeded:
         print(f"⏰ Timeout parsing resume {resume_id} — marking failed")
         update_resume_failed(resume_id)
-        _publish_status(resume_id, "failed")
+        _publish_status(resume_id, "failed", error="timeout")
 
     except Exception as exc:
         attempt = self.request.retries + 1
@@ -78,7 +108,7 @@ def parse_resume_task(self, resume_id: int, file_path: str):
 
         if self.request.retries >= self.max_retries:
             update_resume_failed(resume_id)
-            _publish_status(resume_id, "failed")
+            _publish_status(resume_id, "failed", error="Parse failed after retries")
             return
 
         # Exponential backoff: 30s → 60s → 120s
