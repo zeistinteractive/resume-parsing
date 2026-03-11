@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import {
   searchResumes, autocomplete, getUploaders,
   listSavedSearches, createSavedSearch, deleteSavedSearch,
-  downloadUrl, bulkDownload,
+  getDownloadUrl, bulkDownload,
 } from '../api'
 
 // ── Constants ──────────────────────────────────────────────────────────────────
@@ -32,10 +32,10 @@ const EMPTY_FILTERS = {
 
 function SkillPill({ skill, onRemove }) {
   return (
-    <span className="inline-flex items-center gap-1 text-xs bg-blue-100 text-blue-800 px-2 py-0.5 rounded-full">
+    <span className="inline-flex items-center gap-1 text-xs bg-indigo-50 text-indigo-700 ring-1 ring-inset ring-indigo-100 px-2.5 py-0.5 rounded-lg font-medium">
       {skill}
       {onRemove && (
-        <button onClick={onRemove} className="text-blue-500 hover:text-blue-800 leading-none">×</button>
+        <button onClick={onRemove} className="text-indigo-400 hover:text-indigo-700 leading-none ml-0.5">×</button>
       )}
     </span>
   )
@@ -44,9 +44,9 @@ function SkillPill({ skill, onRemove }) {
 function FileIcon({ filename = '' }) {
   const ext = filename.split('.').pop().toLowerCase()
   if (ext === 'pdf')
-    return <span className="text-xs font-bold text-red-500 bg-red-50 border border-red-200 px-1.5 py-0.5 rounded">PDF</span>
+    return <span className="text-xs font-semibold text-red-600 bg-red-50 border border-red-200 px-1.5 py-0.5 rounded-md">PDF</span>
   if (ext === 'docx' || ext === 'doc')
-    return <span className="text-xs font-bold text-blue-500 bg-blue-50 border border-blue-200 px-1.5 py-0.5 rounded">DOC</span>
+    return <span className="text-xs font-semibold text-blue-600 bg-blue-50 border border-blue-200 px-1.5 py-0.5 rounded-md">DOC</span>
   return null
 }
 
@@ -189,6 +189,22 @@ function FilterPanel({ filters, onChange, onClear, activeCount, uploaders = [] }
         />
       </div>
 
+      {/* Uploaded By */}
+      {uploaders.length > 0 && (
+        <div>
+          <label className="block text-xs font-medium text-gray-500 mb-1.5">Uploaded By</label>
+          <select
+            value={filters.uploaded_by}
+            onChange={e => set('uploaded_by', e.target.value)}
+            className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 bg-white">
+            <option value="">Anyone</option>
+            {uploaders.map(u => (
+              <option key={u.id} value={u.id}>{u.full_name}</option>
+            ))}
+          </select>
+        </div>
+      )}
+
       {/* Education */}
       <div>
         <label className="block text-xs font-medium text-gray-500 mb-1.5">Education</label>
@@ -227,22 +243,6 @@ function FilterPanel({ filters, onChange, onClear, activeCount, uploaders = [] }
             className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" />
         </div>
       </div>
-
-      {/* Uploaded By */}
-      {uploaders.length > 0 && (
-        <div>
-          <label className="block text-xs font-medium text-gray-500 mb-1.5">Uploaded By</label>
-          <select
-            value={filters.uploaded_by}
-            onChange={e => set('uploaded_by', e.target.value)}
-            className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 bg-white">
-            <option value="">Anyone</option>
-            {uploaders.map(u => (
-              <option key={u.id} value={u.id}>{u.full_name}</option>
-            ))}
-          </select>
-        </div>
-      )}
     </aside>
   )
 }
@@ -250,13 +250,31 @@ function FilterPanel({ filters, onChange, onClear, activeCount, uploaders = [] }
 // ── Result Card ────────────────────────────────────────────────────────────────
 
 function ResultCard({ result, onClick, selected, onToggle }) {
+  const initials = (result.candidate_name || result.filename)[0].toUpperCase()
+  const date = result.uploaded_at
+    ? new Date(result.uploaded_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+    : null
+  const [downloading, setDownloading] = useState(false)
+
+  async function handleDownload(e) {
+    e.stopPropagation()
+    setDownloading(true)
+    try {
+      const url = await getDownloadUrl(result.id)
+      window.location.href = url
+    } catch { /* silent */ }
+    finally { setDownloading(false) }
+  }
+
   return (
     <div
       onClick={onClick}
-      className={`bg-white border rounded-xl p-5 hover:shadow-md cursor-pointer transition-all ${
-        selected ? 'border-blue-400 bg-blue-50/30' : 'border-gray-200 hover:border-blue-300'
+      className={`group bg-white border rounded-2xl p-5 cursor-pointer transition-all duration-150 ${
+        selected
+          ? 'border-indigo-400 shadow-md shadow-indigo-100/60 bg-indigo-50/20'
+          : 'border-slate-200 hover:border-indigo-300 hover:shadow-md hover:shadow-slate-100'
       }`}>
-      <div className="flex items-start gap-3">
+      <div className="flex items-start gap-4">
 
         {/* Checkbox */}
         <div className="shrink-0 mt-1" onClick={e => { e.stopPropagation(); onToggle(result.id) }}>
@@ -264,68 +282,77 @@ function ResultCard({ result, onClick, selected, onToggle }) {
             type="checkbox"
             checked={selected}
             onChange={() => {}}
-            className="w-4 h-4 accent-blue-600 cursor-pointer rounded"
+            className="w-4 h-4 accent-indigo-600 cursor-pointer rounded"
           />
+        </div>
+
+        {/* Avatar */}
+        <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 font-bold text-sm ${
+          selected ? 'bg-indigo-200 text-indigo-700' : 'bg-indigo-100 text-indigo-600'
+        }`}>
+          {initials}
         </div>
 
         {/* Main content */}
         <div className="min-w-0 flex-1">
-          <div className="flex items-start gap-2 mb-1">
-            <span className="text-xl mt-0.5 shrink-0">👤</span>
-            <div className="min-w-0 flex-1">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
               <div className="flex items-center gap-2 flex-wrap">
-                <h3 className="font-semibold text-gray-900 text-base leading-snug">
+                <h3 className="font-semibold text-slate-900 text-base leading-snug">
                   {result.candidate_name || result.filename}
                 </h3>
                 <FileIcon filename={result.filename} />
               </div>
-              <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-sm text-gray-500 mt-0.5">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-sm text-slate-500 mt-0.5">
                 {result.current_title && (
-                  <span className="font-medium text-gray-700">{result.current_title}</span>
+                  <span className="font-medium text-indigo-600">{result.current_title}</span>
                 )}
                 {result.experience_years > 0 && (
-                  <span>·&nbsp;{result.experience_years} yr{result.experience_years !== 1 ? 's' : ''}</span>
+                  <span className="text-slate-400">· {result.experience_years} yr{result.experience_years !== 1 ? 's' : ''}</span>
                 )}
                 {result.location && (
-                  <span>·&nbsp;📍 {result.location}</span>
+                  <span className="text-slate-400">· 📍 {result.location}</span>
                 )}
+              </div>
+            </div>
+
+            {/* Right meta */}
+            <div className="shrink-0 flex flex-col items-end gap-2">
+              {date && <span className="text-xs text-slate-400">{date}</span>}
+              <div className="flex items-center gap-1.5">
+                <button
+                  onClick={handleDownload}
+                  disabled={downloading}
+                  title="Download"
+                  className="p-1.5 rounded-lg text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 disabled:opacity-40 transition-colors">
+                  {downloading
+                    ? <span className="w-4 h-4 border-2 border-slate-300 border-t-indigo-500 rounded-full animate-spin block" />
+                    : <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" />
+                      </svg>
+                  }
+                </button>
+                <span className="text-slate-300 group-hover:text-indigo-400 transition-colors">
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3" />
+                  </svg>
+                </span>
               </div>
             </div>
           </div>
 
           {/* FTS snippet */}
           {result.snippet && (
-            <p className="text-sm text-gray-600 leading-relaxed mb-2 pl-7 line-clamp-2"
+            <p className="text-sm text-slate-500 leading-relaxed mt-2 line-clamp-2"
               dangerouslySetInnerHTML={{ __html: result.snippet }} />
           )}
 
           {/* Skills */}
           {result.skills?.length > 0 && (
-            <div className="flex flex-wrap gap-1 pl-7">
+            <div className="flex flex-wrap gap-1.5 mt-2.5">
               {result.skills.map(s => <SkillPill key={s} skill={s} />)}
             </div>
           )}
-        </div>
-
-        {/* Right column: date + download + arrow */}
-        <div className="shrink-0 flex flex-col items-end gap-2">
-          {result.uploaded_at && (
-            <span className="text-xs text-gray-400">
-              {new Date(result.uploaded_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
-            </span>
-          )}
-          <div className="flex items-center gap-2">
-            <a
-              href={downloadUrl(result.id)}
-              download
-              onClick={e => e.stopPropagation()}
-              title="Download resume"
-              className="text-gray-400 hover:text-blue-600 transition-colors text-base leading-none"
-            >
-              ⬇
-            </a>
-            <span className="text-blue-400 text-lg">→</span>
-          </div>
         </div>
       </div>
     </div>
@@ -334,12 +361,12 @@ function ResultCard({ result, onClick, selected, onToggle }) {
 
 function SkeletonCard() {
   return (
-    <div className="bg-white border border-gray-200 rounded-xl p-5 animate-pulse">
-      <div className="flex gap-3 mb-3">
-        <div className="w-8 h-8 bg-gray-200 rounded-full shrink-0" />
+    <div className="bg-white border border-slate-200 rounded-2xl p-5 animate-pulse">
+      <div className="flex gap-4 mb-3">
+        <div className="w-10 h-10 bg-slate-200 rounded-xl shrink-0" />
         <div className="flex-1 space-y-2">
-          <div className="h-4 bg-gray-200 rounded w-48" />
-          <div className="h-3 bg-gray-100 rounded w-64" />
+          <div className="h-4 bg-slate-200 rounded w-48" />
+          <div className="h-3 bg-slate-100 rounded w-64" />
         </div>
       </div>
       <div className="h-3 bg-gray-100 rounded w-full mb-1.5 ml-11" />
@@ -459,21 +486,25 @@ function SavedSearchesBar({ saved, onLoad, onDelete, onSave, canSave }) {
 function BulkBar({ count, onSelectAll, onClear, onDownload, downloading }) {
   return (
     <div className="fixed bottom-0 left-0 right-0 z-40 flex justify-center pointer-events-none">
-      <div className="mb-6 pointer-events-auto bg-gray-900 text-white rounded-2xl shadow-2xl px-5 py-3 flex items-center gap-4 text-sm">
+      <div className="mb-6 ml-60 pointer-events-auto bg-slate-900 text-white rounded-2xl shadow-2xl px-5 py-3 flex items-center gap-4 text-sm border border-slate-700">
+        <div className="w-2 h-2 rounded-full bg-indigo-400 animate-pulse" />
         <span className="font-semibold">{count} selected</span>
-        <span className="text-gray-500">|</span>
-        <button onClick={onSelectAll} className="text-gray-300 hover:text-white transition-colors">
+        <span className="text-slate-600">|</span>
+        <button onClick={onSelectAll} className="text-slate-300 hover:text-white transition-colors">
           Select all on page
         </button>
-        <button onClick={onClear} className="text-gray-300 hover:text-white transition-colors">
+        <button onClick={onClear} className="text-slate-300 hover:text-white transition-colors">
           Clear
         </button>
         <button
           onClick={onDownload}
           disabled={downloading}
-          className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-60 px-4 py-1.5 rounded-lg font-medium transition-colors"
+          className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-60 px-4 py-1.5 rounded-xl font-medium transition-colors"
         >
-          {downloading ? 'Preparing…' : '⬇ Download ZIP'}
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" />
+          </svg>
+          {downloading ? 'Preparing…' : 'Download ZIP'}
         </button>
       </div>
     </div>
@@ -674,36 +705,43 @@ export default function Search() {
   return (
     <div>
       {/* Page header */}
-      <h1 className="text-2xl font-bold text-gray-800 mb-1">Search Resumes</h1>
-      <p className="text-gray-500 mb-5">Search by keyword, or use filters to find the right candidates.</p>
+      <div className="mb-6">
+        <h1 className="text-2xl font-bold text-slate-900">Search Resumes</h1>
+        <p className="text-slate-500 text-sm mt-1">Search by keyword, or use filters to find the right candidates.</p>
+      </div>
 
       {/* Search bar */}
-      <div className="relative mb-2">
-        <span className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 text-xl pointer-events-none">🔍</span>
+      <div className="relative mb-3">
+        <div className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none">
+          <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" />
+          </svg>
+        </div>
         <input
           autoFocus
           type="text"
           value={query}
           onChange={e => { setQuery(e.target.value); setOffset(0) }}
-          placeholder="e.g. Python React Docker, Senior Engineer, Pune…"
-          className="w-full pl-11 pr-10 py-3.5 text-lg border border-gray-300 rounded-xl shadow-sm
-            focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+          placeholder="e.g. Python React, Senior Engineer, Mumbai…"
+          className="w-full pl-12 pr-10 py-3.5 text-base border border-slate-300 rounded-2xl shadow-sm
+            focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-400
+            placeholder:text-slate-400 bg-white"
         />
         {query && (
           <button onClick={() => resetAndSearch({ query: '' })}
-            className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 text-xl">
+            className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 text-xl leading-none">
             ×
           </button>
         )}
       </div>
 
       {/* Controls row: AND/OR toggle + filter toggle */}
-      <div className="flex items-center gap-3 mb-2">
-        <div className="flex rounded-lg border border-gray-200 overflow-hidden text-xs font-medium">
+      <div className="flex items-center gap-3 mb-3">
+        <div className="flex rounded-xl border border-slate-200 overflow-hidden text-xs font-medium shadow-sm">
           {['or', 'and'].map(m => (
             <button key={m} onClick={() => resetAndSearch({ mode: m })}
-              className={`px-3 py-1.5 transition-colors ${
-                mode === m ? 'bg-blue-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'
+              className={`px-3.5 py-2 transition-colors ${
+                mode === m ? 'bg-indigo-600 text-white' : 'bg-white text-slate-600 hover:bg-slate-50'
               }`}>
               {m === 'or' ? 'ANY keyword' : 'ALL keywords'}
             </button>
@@ -712,14 +750,18 @@ export default function Search() {
 
         <button
           onClick={() => setFiltersOpen(o => !o)}
-          className={`flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg border transition-colors ${
-            filtersOpen
-              ? 'bg-gray-100 border-gray-300 text-gray-700'
-              : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'
+          className={`flex items-center gap-2 text-xs font-medium px-3.5 py-2 rounded-xl border shadow-sm transition-colors ${
+            filtersOpen || activeFilterCount > 0
+              ? 'bg-indigo-50 border-indigo-200 text-indigo-700'
+              : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
           }`}>
-          <span>⚙</span>
-          <span>Filters{activeFilterCount > 0 ? ` (${activeFilterCount})` : ''}</span>
-          <span className="text-gray-400">{filtersOpen ? '▲' : '▼'}</span>
+          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M10.5 6h9.75M10.5 6a1.5 1.5 0 1 1-3 0m3 0a1.5 1.5 0 1 0-3 0M3.75 6H7.5m3 12h9.75m-9.75 0a1.5 1.5 0 0 1-3 0m3 0a1.5 1.5 0 0 0-3 0m-3.75 0H7.5m9-6h3.75m-3.75 0a1.5 1.5 0 0 1-3 0m3 0a1.5 1.5 0 0 0-3 0m-9.75 0h9.75" />
+          </svg>
+          Filters{activeFilterCount > 0 ? ` (${activeFilterCount})` : ''}
+          <svg className={`w-3 h-3 transition-transform ${filtersOpen ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
+          </svg>
         </button>
       </div>
 
@@ -752,15 +794,20 @@ export default function Search() {
           {/* Sort + result count header */}
           {(results !== null || loading) && (
             <div className="flex items-center justify-between mb-4">
-              <p className="text-sm text-gray-500">
-                {loading ? 'Searching…' : (
+              <p className="text-sm text-slate-500">
+                {loading ? (
+                  <span className="flex items-center gap-2">
+                    <span className="inline-block w-4 h-4 border-2 border-indigo-300 border-t-indigo-600 rounded-full animate-spin" />
+                    Searching…
+                  </span>
+                ) : (
                   total === 0
                     ? 'No matches found'
-                    : <><span className="font-semibold text-gray-800">{total}</span> candidate{total !== 1 ? 's' : ''} found</>
+                    : <><span className="font-semibold text-slate-800">{total}</span> candidate{total !== 1 ? 's' : ''} found</>
                 )}
               </p>
               <div className="flex items-center gap-2">
-                <span className="text-xs text-gray-400">Sort:</span>
+                <span className="text-xs text-slate-400">Sort:</span>
                 <select
                   value={sort}
                   onChange={e => resetAndSearch({ sort: e.target.value })}

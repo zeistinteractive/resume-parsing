@@ -175,6 +175,14 @@ export async function getDownloadUrl(id) {
   return url
 }
 
+export async function getDownloadHistory(limit = 25, offset = 0) {
+  const res = await _fetch(`${BASE}/download/history?limit=${limit}&offset=${offset}`, {
+    headers: _authHeaders(),
+  })
+  if (!res.ok) throw new Error('Failed to fetch download history')
+  return res.json()
+}
+
 export function downloadUrl(id) {
   return `${BASE}/resumes/${id}/download`
 }
